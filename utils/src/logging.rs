@@ -12,11 +12,11 @@ impl FormatTime for Date {
 }
 
 pub fn init_tracing() {
-    tracing_subscriber::fmt::Subscriber::builder()
+    let _ = tracing_subscriber::fmt::Subscriber::builder()
         .with_timer(Date)
         .with_target(true)
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
-        .init();
+        .try_init();
 }
