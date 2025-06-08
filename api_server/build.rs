@@ -7,7 +7,7 @@ fn main() {
     tonic_build::configure()
         .protoc_arg("--experimental_allow_proto3_optional")
         .build_client(true)
-        .build_server(false)
+        .build_server(true)
         .out_dir("src/pb")
         .include_file("mod.rs")
         .compile_protos(&["../proto/llm.proto"], &["../proto"])
