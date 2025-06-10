@@ -17,6 +17,10 @@ pub struct LLMEngineArgs {
     #[arg(long, default_value_t = 0.9)]
     pub gpu_memory_fraction: f32,
 
+    // Host-side KV cache size in GB
+    #[arg(long, default_value_t = 16)]
+    pub host_kv_cache_size: usize,
+
     #[arg(long, default_value_t = 256)]
     pub max_batch_size: usize,
 

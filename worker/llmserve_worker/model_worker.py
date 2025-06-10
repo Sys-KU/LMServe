@@ -41,23 +41,32 @@ def build_prefill_wrapper(
         num_blocks_per_seqs.append(len(data.block_ids))
         kv_last_block_lens.append(((seqlen_k - 1) % page_size) + 1)
 
-    cu_seqlens_q_tensor = torch.tensor(np.cumsum([0] + seqlens_q),
-                                       dtype=torch.int,
-                                       device='cuda')
+    cu_seqlens_q_tensor = torch.tensor(
+        np.cumsum([0] + seqlens_q),
+        dtype=torch.int,
+        device='cuda',
+    )
     kv_block_indptrs_tensor = torch.tensor(
         np.cumsum([0] + num_blocks_per_seqs),
         dtype=torch.int,
-        device='cuda')
-    kv_block_indices_tensor = torch.tensor(kv_block_indices,
-                                           dtype=torch.int,
-                                           device='cuda')
-    kv_last_block_lens_tensor = torch.tensor(kv_last_block_lens,
-                                             dtype=torch.int,
-                                             device='cuda')
+        device='cuda',
+    )
+    kv_block_indices_tensor = torch.tensor(
+        kv_block_indices,
+        dtype=torch.int,
+        device='cuda',
+    )
+    kv_last_block_lens_tensor = torch.tensor(
+        kv_last_block_lens,
+        dtype=torch.int,
+        device='cuda',
+    )
 
-    workspace_buffer = torch.empty(128 * 1024 * 1024,
-                                   dtype=torch.uint8,
-                                   device="cuda")
+    workspace_buffer = torch.empty(
+        128 * 1024 * 1024,
+        dtype=torch.uint8,
+        device="cuda",
+    )
 
     prefill_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
         workspace_buffer, "NHD")
@@ -103,13 +112,18 @@ def build_decode_wrapper(
     kv_block_indptrs_tensor = torch.tensor(
         np.cumsum([0] + num_blocks_per_seqs),
         dtype=torch.int,
-        device='cuda')
-    kv_block_indices_tensor = torch.tensor(kv_block_indices,
-                                           dtype=torch.int,
-                                           device='cuda')
-    kv_last_block_lens_tensor = torch.tensor(kv_last_block_lens,
-                                             dtype=torch.int,
-                                             device='cuda')
+        device='cuda',
+    )
+    kv_block_indices_tensor = torch.tensor(
+        kv_block_indices,
+        dtype=torch.int,
+        device='cuda',
+    )
+    kv_last_block_lens_tensor = torch.tensor(
+        kv_last_block_lens,
+        dtype=torch.int,
+        device='cuda',
+    )
 
     workspace_buffer = torch.empty(128 * 1024 * 1024,
                                    dtype=torch.uint8,
@@ -246,7 +260,7 @@ class ModelWorker:
                 def pre_hook_fn(mod, input):
                     if self.enable_wait_before_execute:
                         self.kv_worker_handle.model_queue.get()
-                        self.kv_worker_handle.pre_events[i].record()
+                        self.kv_worker_handle.pre_events[i].synchronize()
 
                 def post_hook_fn(mod, input, output):
                     if self.enable_record_after_execute:

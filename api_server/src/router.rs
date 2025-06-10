@@ -3,15 +3,14 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Result;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::{Channel, Endpoint, Uri};
 use tracing::debug;
 
 use crate::pb::llm::llm_client::LlmClient;
 use crate::pb::llm::{GenerateRequest, GenerateResponse};
-
-use anyhow::Result;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum EngineKind {
@@ -76,7 +75,7 @@ impl EngineRouter {
         Ok(())
     }
 
-    async fn get_client(&self, kind: EngineKind) -> Result<LlmClient<Channel>> {
+    async fn get_client(&self, kind: EngineKind) -> Result<(LlmClient<Channel>, Uri)> {
         let endpoint = {
             let mut mapping_table_guard = self.mapping_table.lock().await;
 
@@ -92,13 +91,15 @@ impl EngineRouter {
                 .clone()
         };
 
-        Ok(LlmClient::connect(endpoint).await?)
+        let uri = endpoint.uri().clone();
+
+        Ok((LlmClient::connect(endpoint).await?, uri))
     }
 
     // FIXME(jinu)
     pub async fn generate(&self, request: GenerateRequest) -> Result<GenerateResponse> {
         let response;
-        if let Ok(mut client) = self.get_client(EngineKind::FULL).await {
+        if let Ok((mut client, _)) = self.get_client(EngineKind::FULL).await {
             response = client.generate(request).await?.into_inner();
         } else {
             response = self.generate_dist(request).await?;
@@ -108,8 +109,8 @@ impl EngineRouter {
     }
 
     pub async fn generate_dist(&self, request: GenerateRequest) -> Result<GenerateResponse> {
-        let mut prefill_client = self.get_client(EngineKind::PREFILL).await?;
-        let mut decode_client = self.get_client(EngineKind::DECODE).await?;
+        let (mut prefill_client, prefill_uri) = self.get_client(EngineKind::PREFILL).await?;
+        let (mut decode_client, _) = self.get_client(EngineKind::DECODE).await?;
 
         let num_samples = request.num_samples;
         let max_output_len = request.max_output_len;
@@ -121,11 +122,16 @@ impl EngineRouter {
             num_samples: 1,
             max_output_len: Some(1),
             ignore_eos,
+            server_url: None,
         };
 
         let p_response: GenerateResponse = prefill_client.generate(p_request).await?.into_inner();
 
         let output_ids = p_response.output_ids;
+        let max_output_len = match max_output_len {
+            Some(max_output_len) => Some(max_output_len - 1),
+            None => None,
+        };
 
         let d_request = GenerateRequest {
             session_id: request.session_id.clone(),
@@ -133,6 +139,7 @@ impl EngineRouter {
             num_samples,
             max_output_len,
             ignore_eos,
+            server_url: Some(prefill_uri.to_string()),
         };
 
         let d_response: GenerateResponse = decode_client.generate(d_request).await?.into_inner();

@@ -1,0 +1,10 @@
+model_name: "Qwen/Qwen2.5-7B"
+
+api_server:
+  address: "127.0.0.1:8000"
+
+llm_servers:
+  - kind: "prefill"
+    address: "127.0.0.1:7000"
+  - kind: "decode"
+    address: "127.0.0.1:7001"

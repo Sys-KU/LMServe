@@ -9,7 +9,10 @@ use tracing::debug;
 use llmserve::args::LLMEngineArgs;
 use llmserve::engine::LLMEngineWrapper;
 use llmserve::pb::llm::llm_server::{Llm, LlmServer};
-use llmserve::pb::llm::{GenerateRequest, GenerateResponse, GetKindResponse};
+use llmserve::pb::llm::{
+    GenerateRequest, GenerateResponse, GetDescriptorsRequest, GetDescriptorsResponse,
+    GetKindResponse, GetKvAgentMetadataResponse,
+};
 
 pub struct LLMService {
     kind: String,
@@ -36,6 +39,7 @@ impl Llm for LLMService {
         let num_samples = generate_request.num_samples;
         let max_output_len = generate_request.max_output_len;
         let ignore_eos = generate_request.ignore_eos;
+        let server_url = generate_request.server_url;
 
         let output = self
             .engine
@@ -45,6 +49,7 @@ impl Llm for LLMService {
                 session_id,
                 max_output_len.map(|x| x as usize),
                 ignore_eos,
+                server_url,
             )
             .await
             .expect("Failed to generate");
@@ -52,6 +57,42 @@ impl Llm for LLMService {
         Ok(Response::new(GenerateResponse {
             session_id: output.session_id,
             output_ids: output.output_ids,
+        }))
+    }
+
+    #[allow(unused_variables)]
+    async fn get_kv_agent_metadata(
+        &self,
+        request: Request<()>,
+    ) -> Result<Response<GetKvAgentMetadataResponse>, Status> {
+        let local_agent_metadata = self
+            .engine
+            .get_kv_agent_metadata()
+            .await
+            .expect("Failed to get KV agent metadat");
+
+        Ok(Response::new(GetKvAgentMetadataResponse {
+            metadata: local_agent_metadata,
+        }))
+    }
+
+    async fn get_descriptors(
+        &self,
+        request: Request<GetDescriptorsRequest>,
+    ) -> Result<Response<GetDescriptorsResponse>, Status> {
+        let get_desc_request = request.into_inner();
+
+        let session_id = get_desc_request.session_id;
+
+        let (descs, num_blocks) = self
+            .engine
+            .get_descriptors(session_id)
+            .await
+            .expect("Failed to get descriptors");
+
+        Ok(Response::new(GetDescriptorsResponse {
+            descs,
+            num_blocks: num_blocks as u64,
         }))
     }
 }
@@ -74,6 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.model_name,
             args.block_size,
             args.gpu_memory_fraction,
+            args.host_kv_cache_size,
             args.max_batch_size,
             args.max_seq_len,
             args.max_num_batched_tokens,

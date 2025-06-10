@@ -6,7 +6,12 @@ package LLM;
 
 service LLM {
   rpc get_kind(google.protobuf.Empty) returns (GetKindResponse);
+
   rpc generate(GenerateRequest) returns (GenerateResponse);
+
+  rpc get_kv_agent_metadata(google.protobuf.Empty) returns (GetKVAgentMetadataResponse);
+
+  rpc get_descriptors(GetDescriptorsRequest) returns (GetDescriptorsResponse);
 }
 
 message GetKindResponse {
@@ -19,9 +24,19 @@ message GenerateRequest {
   uint32 num_samples = 3;
   optional uint64 max_output_len = 4;
   bool ignore_eos = 5;
+  optional string server_url = 6;
 }
 
 message GenerateResponse {
   string session_id = 1;
   repeated uint32 output_ids = 2;
+}
+
+message GetKVAgentMetadataResponse { repeated bytes metadata = 1; }
+
+message GetDescriptorsRequest { string session_id = 1; }
+
+message GetDescriptorsResponse {
+  repeated bytes descs = 1;
+  uint64 num_blocks = 2;
 }

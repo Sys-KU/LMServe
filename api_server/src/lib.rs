@@ -54,6 +54,7 @@ impl APIServer {
                 num_samples: params.num_samples as u32,
                 max_output_len: params.max_output_len,
                 ignore_eos: params.ignore_eos,
+                server_url: None,
             })
             .await?;
 

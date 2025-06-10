@@ -7,6 +7,7 @@ import torch.multiprocessing as mp
 import logging
 
 from loguru import logger
+from google.protobuf.empty_pb2 import Empty
 
 from llmserve_worker import ModelWorker, KVWorker
 from llmserve_worker.kv_worker import KVWorkerParams
@@ -20,6 +21,12 @@ from llmserve_worker.pb.worker_pb2 import (
     InitCacheResponse,
     KVTransferRequest,
     KVTransferResponse,
+    AgentMetadata,
+    AddRemoteAgentMetadataResponse,
+    GetDescriptorsRequest,
+    GetDescriptorsResponse,
+    PullKVRequest,
+    PullKVResponse,
 )
 
 
@@ -80,15 +87,17 @@ class WorkerService(worker_pb2_grpc.WorkerServicer):
         request: InitCacheRequest,
         context: grpc.aio.ServicerContext,
     ) -> InitCacheResponse:
-        cache_size = request.cache_size
+        gpu_cache_size = request.gpu_cache_size
+        host_cache_size = request.host_cache_size
 
-        num_blocks, kv_worker_params = self.worker.init_cache(cache_size)
+        num_blocks, kv_worker_params = self.worker.init_cache(gpu_cache_size)
 
         kv_uds_path = "{}-kv".format(self.uds_path)
 
         kv_worker = mp.Process(target=init_kv_cache,
                                args=(
                                    kv_worker_params,
+                                   host_cache_size,
                                    torch.cuda.current_device(),
                                    kv_uds_path,
                                ))
@@ -108,15 +117,69 @@ class KVWorkerService(worker_pb2_grpc.KVWorkerServicer):
         request: KVTransferRequest,
         context: grpc.aio.ServicerContext,
     ) -> KVTransferResponse:
-        block_mappings = request.block_mappings
+        fetch_block_mappings = request.fetch_block_mappings
+        write_back_block_mappings = request.write_back_block_mappings
 
-        self.worker.transfer(block_mappings)
+        self.worker.transfer(fetch_block_mappings, write_back_block_mappings)
 
         return KVTransferResponse(success=True)
+
+    async def GetLocalAgentMetadata(
+        self,
+        request: Empty,
+        context: grpc.aio.ServicerContext,
+    ) -> AgentMetadata:
+        return AgentMetadata(data=self.worker.kv_agent_metadata)
+
+    async def AddRemoteAgentMetadata(
+        self,
+        request: AgentMetadata,
+        context: grpc.aio.ServicerContext,
+    ) -> AddRemoteAgentMetadataResponse:
+        remote_agent_metadata = request.data
+
+        # TODO(jinu): Add error handling
+        peer_name = self.worker.kv_agent.add_remote_agent(
+            remote_agent_metadata)
+
+        return AddRemoteAgentMetadataResponse(peer_name=peer_name)
+
+    async def GetDescriptors(
+        self,
+        request: GetDescriptorsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> GetDescriptorsResponse:
+        seq_ids = request.seq_ids
+
+        descs, num_blocks = self.worker.get_descriptors(seq_ids)
+
+        return GetDescriptorsResponse(descs=descs, num_blocks=num_blocks)
+
+    async def PullKV(
+        self,
+        request: PullKVRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> PullKVResponse:
+        peer_name = request.peer_name
+        descs = request.descs
+        num_blocks = request.num_blocks
+        session_id = request.session_id
+        seq_ids = request.seq_ids
+
+        ret = self.worker.pull_kv(
+            peer_name,
+            descs,
+            num_blocks,
+            session_id,
+            seq_ids,
+        )
+
+        return PullKVResponse(success=ret)
 
 
 def init_kv_cache(
     params: KVWorkerParams,
+    host_cache_size: int,
     device: int,
     uds_path: str,
 ):
@@ -125,7 +188,12 @@ def init_kv_cache(
 
     torch.cuda.set_device(device)
 
-    worker = KVWorker(params)
+    # TODO(jinu): Set the name using local IP instead of uds path.
+    worker = KVWorker(
+        name=uds_path,
+        params=params,
+        host_cache_size=host_cache_size,
+    )
     logger.info(f"Launching KV Cache on GPU {device}...")
 
     async def kv_cache_inner(worker: KVWorker, uds_path: str):
@@ -151,7 +219,7 @@ def init_kv_cache(
 
         await shutdown_event.wait()
 
-        logger.info("Shutting the model worker.")
+        logger.info("Shutting the KV worker.")
 
     asyncio.run(kv_cache_inner(worker, uds_path))
 

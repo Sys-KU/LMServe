@@ -1,5 +1,7 @@
 syntax = "proto3";
 
+import "google/protobuf/empty.proto";
+
 package worker;
 
 service Worker {
@@ -10,6 +12,11 @@ service Worker {
 
 service KVWorker {
   rpc TransferKV(KVTransferRequest) returns (KVTransferResponse);
+  rpc GetLocalAgentMetadata(google.protobuf.Empty) returns (AgentMetadata);
+  rpc AddRemoteAgentMetadata(AgentMetadata)
+      returns (AddRemoteAgentMetadataResponse);
+  rpc GetDescriptors(GetDescriptorsRequest) returns (GetDescriptorsResponse);
+  rpc PullKV(PullKVRequest) returns (PullKVResponse);
 }
 
 message WarmupRequest {
@@ -48,20 +55,42 @@ message InferOutput {
 
 message InferResponse { map<uint64, InferOutput> outputs = 1; }
 
-message InitCacheRequest { uint64 cache_size = 2; }
+message InitCacheRequest {
+  uint64 gpu_cache_size = 1;
+  uint64 host_cache_size = 2;
+}
 
 message InitCacheResponse { uint64 num_blocks = 1; }
 
 message BlockMapping {
   uint64 seq_id = 1;
-  uint64 block_offset = 2;
-  repeated uint32 block_ids = 3;
+  repeated uint32 block_ids = 2;
 }
 
 message KVTransferRequest {
-  repeated BlockMapping block_mappings = 1;
+  repeated BlockMapping fetch_block_mappings = 1;
+  repeated BlockMapping write_back_block_mappings = 2;
 }
 
-message KVTransferResponse {
-  bool success = 1;
+message KVTransferResponse { bool success = 1; }
+
+message AgentMetadata { bytes data = 1; }
+
+message AddRemoteAgentMetadataResponse { string peer_name = 1; }
+
+message GetDescriptorsRequest { repeated uint64 seq_ids = 1; }
+
+message GetDescriptorsResponse {
+  bytes descs = 1;
+  uint64 num_blocks = 2;
 }
+
+message PullKVRequest {
+  string peer_name = 1;
+  bytes descs = 2;
+  uint64 num_blocks = 3;
+  string session_id = 4;
+  repeated uint64 seq_ids = 5;
+}
+
+message PullKVResponse { bool success = 1; }

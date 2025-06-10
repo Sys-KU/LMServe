@@ -2,5 +2,4 @@
 
 ## Implementation TODO
 - [x] Tensor-Parallelism (TP)
-- [ ] Disaggregating Prefill and Decoding
-* Copy KV
+- [x] Disaggregating Prefill and Decoding

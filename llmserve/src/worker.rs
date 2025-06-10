@@ -12,8 +12,11 @@ use crate::infer_task::{InferInput, InferOutput};
 use crate::pb::worker::kv_worker_client::KvWorkerClient;
 use crate::pb::worker::worker_client::WorkerClient;
 use crate::pb::worker::{
-    BlockMapping, InferRequest, InitCacheRequest, KvTransferRequest, WarmupRequest,
+    AgentMetadata, BlockMapping, GetDescriptorsRequest, InferRequest, InitCacheRequest,
+    KvTransferRequest, PullKvRequest, WarmupRequest,
 };
+
+type Bytes = Vec<u8>;
 
 type StdError = Box<dyn std::error::Error + Send + Sync + 'static>;
 type Result<T, E = StdError> = std::result::Result<T, E>;
@@ -100,6 +103,54 @@ impl KVWorker {
         let _ = self.client.lock().await.transfer_kv(request).await?;
         Ok(())
     }
+
+    async fn get_local_agent_metadata(&self) -> Result<Vec<u8>> {
+        let response = self
+            .client
+            .lock()
+            .await
+            .get_local_agent_metadata(())
+            .await?;
+        let metadata = response.into_inner().data;
+        Ok(metadata)
+    }
+
+    async fn add_remote_agent_metadata(&self, request: AgentMetadata) -> Result<String> {
+        let response = self
+            .client
+            .lock()
+            .await
+            .add_remote_agent_metadata(request)
+            .await?;
+        let peer_name = response.into_inner().peer_name;
+        Ok(peer_name)
+    }
+
+    async fn get_descriptors(&self, request: GetDescriptorsRequest) -> Result<(Bytes, usize)> {
+        let response = self
+            .client
+            .lock()
+            .await
+            .get_descriptors(request)
+            .await?
+            .into_inner();
+
+        let descs = response.descs;
+        let num_blocks = response.num_blocks;
+        Ok((descs, num_blocks as usize))
+    }
+
+    async fn pull_kv(&self, request: PullKvRequest) -> Result<bool> {
+        let response = self
+            .client
+            .lock()
+            .await
+            .pull_kv(request)
+            .await?
+            .into_inner();
+
+        Ok(response.success)
+    }
 }
 
 #[tonic::async_trait]
@@ -107,6 +158,18 @@ trait WorkerGroup: Send + Sync + Sized + 'static {
     type Worker: Worker;
 
     async fn run_workers_gather<V, P, E, Fut, F>(&self, params: P, task_fn: F) -> Result<Vec<V>, E>
+    where
+        V: PartialEq + Send + 'static,
+        P: Send + Sync + Clone + 'static,
+        E: Send + 'static,
+        Fut: std::future::Future<Output = Result<V, E>> + Send + 'static,
+        F: Fn(Arc<Self::Worker>, P) -> Fut + Copy + Send + Sync + 'static;
+
+    async fn run_workers<V, P, E, Fut, F>(
+        &self,
+        params_list: &[P],
+        task_fn: F,
+    ) -> Result<Vec<V>, E>
     where
         V: PartialEq + Send + 'static,
         P: Send + Sync + Clone + 'static,
@@ -136,6 +199,48 @@ impl<T: Worker> WorkerGroup for WorkerGroupImpl<T> {
         for worker in self.workers.iter() {
             let w = Arc::clone(worker);
             let p = params.clone();
+
+            let handle = tokio::spawn(async move { task_fn(w, p).await });
+
+            handles.push(handle);
+        }
+
+        let results = join_all(handles).await;
+
+        let mut outputs = Vec::with_capacity(results.len());
+        for res in results {
+            match res {
+                Ok(Ok(val)) => outputs.push(val),
+                Ok(Err(_)) => panic!("Failed to run worker"),
+                Err(join_err) => {
+                    panic!("tokio::spawn task panicked: {:?}", join_err);
+                }
+            }
+        }
+
+        Ok(outputs)
+    }
+
+    async fn run_workers<V, P, E, Fut, F>(&self, params_list: &[P], task_fn: F) -> Result<Vec<V>, E>
+    where
+        V: PartialEq + Send + 'static,
+        P: Send + Sync + Clone + 'static,
+        E: Send + 'static,
+        Fut: std::future::Future<Output = Result<V, E>> + Send + 'static,
+        F: Fn(Arc<T>, P) -> Fut + Copy + Send + Sync + 'static,
+    {
+        assert!(
+            self.workers.len() == params_list.len(),
+            "Mismatch in number of workers and number of requests: workers = {}, requests = {}",
+            self.workers.len(),
+            params_list.len(),
+        );
+
+        let mut handles = Vec::with_capacity(self.workers.len());
+
+        for (i, worker) in self.workers.iter().enumerate() {
+            let w = Arc::clone(worker);
+            let p = params_list[i].clone();
 
             let handle = tokio::spawn(async move { task_fn(w, p).await });
 
@@ -218,9 +323,10 @@ impl ModelWorkerGroup {
         Ok((total, peak))
     }
 
-    pub async fn init_cache(&self, cache_size: usize) -> Result<u64> {
+    pub async fn init_cache(&self, gpu_cache_size: usize, host_cache_size: usize) -> Result<u64> {
         let request = InitCacheRequest {
-            cache_size: cache_size as u64,
+            gpu_cache_size: gpu_cache_size as u64,
+            host_cache_size: host_cache_size as u64,
         };
         let outputs = self
             .run_workers_gather(request, move |worker, request| async move {
@@ -274,8 +380,15 @@ impl KVWorkerGroup {
         Ok(Self { workers })
     }
 
-    pub async fn transfer_kv(&self, block_mappings: Vec<BlockMapping>) -> Result<()> {
-        let request = KvTransferRequest { block_mappings };
+    pub async fn transfer_kv(
+        &self,
+        fetch_block_mappings: Vec<BlockMapping>,
+        write_back_block_mappings: Vec<BlockMapping>,
+    ) -> Result<()> {
+        let request = KvTransferRequest {
+            fetch_block_mappings,
+            write_back_block_mappings,
+        };
 
         let _ = self
             .run_workers_gather(request, move |worker, request| async move {
@@ -284,5 +397,86 @@ impl KVWorkerGroup {
             .await?;
 
         Ok(())
+    }
+
+    pub async fn get_local_agent_metadata(&self) -> Result<Vec<Vec<u8>>> {
+        let metadata: Vec<Vec<u8>> = self
+            .run_workers_gather((), move |worker, _| async move {
+                worker.get_local_agent_metadata().await
+            })
+            .await?;
+
+        Ok(metadata)
+    }
+
+    pub async fn add_remote_agent_metadata(
+        &self,
+        agent_metadata: Vec<Vec<u8>>,
+    ) -> Result<Vec<String>> {
+        let mut requests: Vec<_> = Vec::with_capacity(self.workers.len());
+        for md in agent_metadata {
+            requests.push(AgentMetadata { data: md })
+        }
+
+        let peer_names = self
+            .run_workers(&requests, move |worker, request| async move {
+                worker.add_remote_agent_metadata(request).await
+            })
+            .await?;
+
+        Ok(peer_names)
+    }
+
+    pub async fn get_descriptors(&self, seq_ids: Vec<u64>) -> Result<(Vec<Bytes>, usize)> {
+        let num_seqs = seq_ids.len();
+        let request = GetDescriptorsRequest { seq_ids };
+        let outputs = self
+            .run_workers_gather(request, move |worker, request| async move {
+                worker.get_descriptors(request).await
+            })
+            .await?;
+
+        let mut descs: Vec<Bytes> = Vec::with_capacity(num_seqs);
+        let mut num_blocks_list: Vec<usize> = Vec::with_capacity(num_seqs);
+
+        for (desc, num_blocks) in outputs {
+            descs.push(desc);
+            num_blocks_list.push(num_blocks);
+        }
+        let num_blocks =
+            extract_if_all_equal(&num_blocks_list).expect("Error: not all values are equal");
+
+        Ok((descs, num_blocks))
+    }
+
+    pub async fn pull_kv(
+        &self,
+        peer_names: Vec<String>,
+        descs: Vec<Bytes>,
+        num_blocks: usize,
+        session_id: String,
+        seq_ids: Vec<u64>,
+    ) -> Result<bool> {
+        assert!(descs.len() == self.workers.len());
+
+        let mut requests: Vec<_> = Vec::with_capacity(self.workers.len());
+        for (peer_name, desc) in peer_names.into_iter().zip(descs) {
+            requests.push(PullKvRequest {
+                peer_name,
+                descs: desc,
+                num_blocks: num_blocks as u64,
+                session_id: session_id.clone(),
+                seq_ids: seq_ids.clone(),
+            })
+        }
+
+        let rets = self
+            .run_workers(&requests, move |worker, request| async move {
+                worker.pull_kv(request).await
+            })
+            .await?;
+
+        let all_success = rets.iter().all(|&x| x);
+        Ok(all_success)
     }
 }

@@ -16,6 +16,7 @@ dependencies = [
     "flashinfer-python>=0.2.5",
     "hf-xet>=1.1.2",
     "pycuda>=2025.1",
+    "nixl>=0.3.0",
 ]
 
 [project.scripts]

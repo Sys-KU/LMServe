@@ -101,8 +101,10 @@ impl Scheduler {
         }
     }
 
-    fn generate_infer_inputs(&self) -> Vec<InferInput> {
+    fn generate_infer_inputs(&self) -> (Vec<InferInput>, Vec<BlockMapping>, Vec<BlockMapping>) {
         let mut infer_inputs: Vec<InferInput> = Vec::new();
+        let mut fetch_block_mappings: Vec<BlockMapping> = Vec::new();
+        let mut write_back_block_mappings: Vec<BlockMapping> = Vec::new();
 
         let mut num_seqs = 0;
         let mut token_budget = self.max_num_batched_tokens;
@@ -112,14 +114,32 @@ impl Scheduler {
                     break 'outer;
                 }
 
-                let filled = self.block_manager.get_filled_token_len(seq.seq_id);
+                let filled = match seq.cached {
+                    true => seq.token_ids.len() - 1,
+                    false => self.block_manager.get_filled_token_len(seq.seq_id),
+                };
                 let total = seq.token_ids.len();
                 let input_len = min(total - filled, token_budget);
                 if input_len > 0 {
                     let input_ids = seq.token_ids[filled..filled + input_len].to_vec();
                     let block_ids = self.block_manager.get_block_ids(seq);
 
-                    infer_inputs.push(InferInput::new(seq.seq_id, input_ids, filled, block_ids));
+                    infer_inputs.push(InferInput::new(
+                        seq.seq_id,
+                        input_ids,
+                        filled,
+                        block_ids.clone(),
+                    ));
+
+                    let block_mapping = BlockMapping {
+                        seq_id: seq.seq_id,
+                        block_ids: block_ids,
+                    };
+
+                    if seq.cached {
+                        fetch_block_mappings.push(block_mapping.clone());
+                    }
+                    write_back_block_mappings.push(block_mapping);
 
                     num_seqs += 1;
                     token_budget -= input_len;
@@ -127,31 +147,14 @@ impl Scheduler {
             }
         }
 
-        infer_inputs
+        (
+            infer_inputs,
+            fetch_block_mappings,
+            write_back_block_mappings,
+        )
     }
 
-    fn generate_block_mappings(&self, infer_inputs: &Vec<InferInput>) -> Vec<BlockMapping> {
-        let mut block_mappings: Vec<_> = Vec::with_capacity(infer_inputs.len());
-        for infer_input in infer_inputs.iter() {
-            let start = infer_input.filled_token_len;
-            let end = start + infer_input.input_len;
-            let (block_offset, block_ids) = self.block_manager.get_block_ids_range(
-                infer_input.seq_id,
-                start as usize,
-                end as usize,
-            );
-
-            block_mappings.push(BlockMapping {
-                seq_id: infer_input.seq_id,
-                block_offset: block_offset as u64,
-                block_ids: block_ids.to_vec(),
-            })
-        }
-
-        block_mappings
-    }
-
-    pub fn schedule(&mut self) -> (Vec<InferInput>, Vec<BlockMapping>) {
+    pub fn schedule(&mut self) -> (Vec<InferInput>, Vec<BlockMapping>, Vec<BlockMapping>) {
         let mut allocated: VecDeque<InferTask> = VecDeque::new();
 
         while let Some(mut infer_task) = self.allocated.pop_front() {
@@ -181,8 +184,8 @@ impl Scheduler {
         }
 
         self.allocated = allocated;
-        let infer_inputs = self.generate_infer_inputs();
-        let block_mappings = self.generate_block_mappings(&infer_inputs);
+        let (infer_inputs, fetch_block_mappings, write_back_block_mappings) =
+            self.generate_infer_inputs();
 
         {
             // Logging
@@ -198,10 +201,14 @@ impl Scheduler {
             }
         }
 
-        (infer_inputs, block_mappings)
+        (
+            infer_inputs,
+            fetch_block_mappings,
+            write_back_block_mappings,
+        )
     }
 
-    pub fn update(&mut self, infer_outputs: HashMap<u64, InferOutput>) -> Vec<InferTask> {
+    pub fn commit(&mut self, infer_outputs: HashMap<u64, InferOutput>) -> Vec<InferTask> {
         let mut finished_tasks: Vec<InferTask> = Vec::new();
         let mut still_allocated_tasks = VecDeque::with_capacity(self.allocated.len());
 
@@ -212,6 +219,7 @@ impl Scheduler {
                 };
 
                 self.block_manager.update_filled_tokens(seq);
+                seq.cached = false;
 
                 seq.append_output_id(output.output_id, output.prob, output.output_word.clone());
 
