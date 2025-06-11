@@ -30,7 +30,7 @@ pub struct Sequence {
     output_token_probs: Vec<f32>,
     filled_token_ids: Vec<u32>,
 
-    append_token_times: Vec<f32>,
+    pub append_token_times: Vec<u64>,
 
     pub ignore_eos: bool,
 
@@ -89,10 +89,11 @@ impl Sequence {
         self.output_words.clone()
     }
 
-    pub fn append_output_id(&mut self, output_id: u32, prob: f32, output_word: String) {
+    pub fn append_output_id(&mut self, output_id: u32, prob: f32, output_word: String, now: u64) {
         self.token_ids.push(output_id);
         self.output_len += 1;
         self.output_token_probs.push(prob);
         self.output_words.push(output_word);
+        self.append_token_times.push(now)
     }
 }

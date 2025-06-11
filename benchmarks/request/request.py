@@ -13,3 +13,4 @@ class APIResponse(TypedDict):
     token_ids: List[int]
     output_text: str
     output_len: int
+    token_latencies: List[float]

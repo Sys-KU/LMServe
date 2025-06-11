@@ -1,15 +1,17 @@
-from typing import List, Tuple, Union, Dict
+import random
+
+from typing import List
 
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
 from .request import APIRequest
 
-
-# dataset_name: ('subset', 'split', 'prompt', 'output')
+# dataset_name: ('hg dataset path', 'subset', 'split', 'prompt', 'output')
 dataset_cols = {
-    "tatsu-lab/alpaca": (None, "train", "instruction", "output"),
-    "openai/openai_humaneval": (None, "test", "prompt", "canonical_solution"),
+    "alpaca": ("tatsu-lab/alpaca", None, "train", "instruction", "output"),
+    "humaneval":
+    ("openai/openai_humaneval", None, "test", "prompt", "canonical_solution"),
 }
 
 
@@ -19,15 +21,15 @@ def load_and_preprocess_dataset(
     max_length: int,
 ):
     if dataset_name in dataset_cols.keys():
-        subset, split, prompt_col, output_col = dataset_cols[dataset_name]
+        (dataset_path, subset, split, prompt_col,
+         output_col) = dataset_cols[dataset_name]
     else:
         raise RuntimeError(
             f"The dataset '{dataset_name}' does not specify which column to"
             "tokenize. If you want to use this dataset, please define"
-            "'dataset_cols' in 'request_generator.py'"
-        )
+            "'dataset_cols' in 'request_generator.py'")
 
-    dataset = load_dataset(dataset_name, subset, split=split)
+    dataset = load_dataset(dataset_path, subset, split=split)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
     def tokenize_function(data):
@@ -59,7 +61,7 @@ def generate_requests(
     num_requests: int,
     num_samples: int,
     ignore_eos: bool,
-) -> Union[List[APIRequest], Tuple[List[APIRequest], Dict[str, str]]]:
+) -> List[APIRequest]:
 
     dataset = load_and_preprocess_dataset(
         dataset_name=dataset_name,
@@ -89,5 +91,37 @@ def generate_requests(
 
             if num_requests_counter >= num_requests:
                 break
+
+    return requests
+
+
+def generate_radom_requests(
+    tokenizer_name: str,
+    max_input_len: int,
+    max_output_len: int,
+    max_seq_len: int,
+    num_requests: int,
+    num_samples: int,
+) -> List[APIRequest]:
+
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+
+    requests: List[APIRequest] = []
+    while len(requests) < num_requests:
+        input_len = random.randint(min(max_input_len, 4), max_input_len)
+        output_len = random.randint(min(max_output_len, 32), max_output_len)
+        if (input_len + output_len) > max_seq_len:
+            continue
+
+        input_ids = [3] * input_len
+        prompt = tokenizer.decode(input_ids)
+
+        request = APIRequest(
+            prompt=prompt,
+            num_samples=num_samples,
+            max_output_len=output_len,
+            ignore_eos=True,
+        )
+        requests.append(request)
 
     return requests

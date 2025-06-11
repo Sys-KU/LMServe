@@ -189,7 +189,7 @@ impl Scheduler {
 
         {
             // Logging
-            let now = utils::time::now();
+            let now = utils::time::now_ns();
 
             if now > self.last_log_time + 5e9 as u64 {
                 info!(
@@ -211,6 +211,7 @@ impl Scheduler {
     pub fn commit(&mut self, infer_outputs: HashMap<u64, InferOutput>) -> Vec<InferTask> {
         let mut finished_tasks: Vec<InferTask> = Vec::new();
         let mut still_allocated_tasks = VecDeque::with_capacity(self.allocated.len());
+        let now = utils::time::now_ns();
 
         for mut task in self.allocated.drain(..) {
             for seq in task.get_active_seqs_mut() {
@@ -221,7 +222,12 @@ impl Scheduler {
                 self.block_manager.update_filled_tokens(seq);
                 seq.cached = false;
 
-                seq.append_output_id(output.output_id, output.prob, output.output_word.clone());
+                seq.append_output_id(
+                    output.output_id,
+                    output.prob,
+                    output.output_word.clone(),
+                    now,
+                );
 
                 if !seq.ignore_eos && output.is_eos {
                     seq.status = SeqStatus::FINISHED;

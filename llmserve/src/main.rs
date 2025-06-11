@@ -57,6 +57,7 @@ impl Llm for LLMService {
         Ok(Response::new(GenerateResponse {
             session_id: output.session_id,
             output_ids: output.output_ids,
+            token_latencies: output.token_latencies,
         }))
     }
 

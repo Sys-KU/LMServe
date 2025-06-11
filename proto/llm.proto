@@ -30,6 +30,7 @@ message GenerateRequest {
 message GenerateResponse {
   string session_id = 1;
   repeated uint32 output_ids = 2;
+  repeated float token_latencies = 3;
 }
 
 message GetKVAgentMetadataResponse { repeated bytes metadata = 1; }

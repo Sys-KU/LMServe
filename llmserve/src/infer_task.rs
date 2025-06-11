@@ -63,6 +63,10 @@ impl InferTask {
     pub fn get_session_id(&self) -> String {
         self.session_id.clone()
     }
+
+    pub fn get_arrival_time(&self) -> u64 {
+        self.arrival_time
+    }
 }
 
 impl InferInput {

@@ -9,7 +9,8 @@ import numpy as np
 from typing import List
 from collections.abc import Callable
 
-from request import generate_requests, APIRequest, APIResponse
+from request import (generate_requests, generate_radom_requests, APIRequest,
+                     APIResponse)
 
 background_tasks = set()
 
@@ -63,17 +64,30 @@ async def run_client(
 def main(args):
     print(args)
 
-    # 32 means number of padding requests
-    num_requests = args.num_requests + 32
+    num_requests = args.num_requests + args.num_padding_requests
 
-    requests: List[APIRequest] = generate_requests(
-        dataset_name=args.dataset,
-        tokenizer_name=args.tokenizer,
-        num_requests=num_requests,
-        max_seq_len=args.max_seq_len,
-        num_samples=args.num_samples,
-        ignore_eos=not args.disable_ignore_eos,
-    )
+    if args.dataset is not None:
+        requests: List[APIRequest] = generate_requests(
+            dataset_name=args.dataset,
+            tokenizer_name=args.tokenizer,
+            num_requests=num_requests,
+            max_seq_len=args.max_seq_len,
+            num_samples=args.num_samples,
+            ignore_eos=not args.disable_ignore_eos,
+        )
+    elif args.input_len is not None and args.output_len is not None:
+        requests: List[APIRequest] = generate_radom_requests(
+            tokenizer_name=args.tokenizer,
+            max_input_len=args.input_len,
+            max_output_len=args.output_len,
+            num_requests=num_requests,
+            max_seq_len=args.max_seq_len,
+            num_samples=args.num_samples,
+        )
+    else:
+        raise RuntimeError(
+            "Invalid configuration: you must either provide a '--dataset'"
+            "or specify both '--input-len' and '--output-len' arguments.")
 
     num_benchmark_reqs = args.num_requests
     intervals = np.random.exponential(1.0 / args.rate, size=num_requests)
@@ -125,7 +139,30 @@ def main(args):
     print("Avg normalized output token latency: "
           f"{avg_norm_token_latency:.4f} s")
 
+    ttfts = [o['token_latencies'][0] for o in outputs]
+    ttft_tails = np.percentile(
+        ttfts,
+        method="closest_observation",
+        q=[50, 90, 99],
+    )
+    print("TTFT:")
+    print("P50: {:.2f} ms, P90: {:.2f} ms, P99: {:.2f} ms".format(
+        ttft_tails[0] * 1000, ttft_tails[1] * 1000, ttft_tails[2] * 1000))
+
+    tpots = []
+    for o in outputs:
+        tpots += o['token_latencies'][1:]
+    tpot_tails = np.percentile(
+        tpots,
+        method="closest_observation",
+        q=[50, 90, 99],
+    )
+    print("TPOT:")
+    print("P50: {:.2f} ms, P90: {:.2f} ms, P99: {:.2f} ms".format(
+        tpot_tails[0] * 1000, tpot_tails[1] * 1000, tpot_tails[2] * 1000))
+
     if args.print_output_text:
+        outputs.sort(key=lambda o: o['output_len'])
         print("Below are the generated text of the processed requests:")
         for i, output in enumerate(outputs):
             print("### Generated output for request {}: {}\n".format(
@@ -136,17 +173,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--dataset", type=str, default="tatsu-lab/alpaca")
+    parser.add_argument("--input-len", type=int)
+    parser.add_argument("--output-len", type=int)
+    parser.add_argument("--dataset", type=str, choices=["alpaca", "humaneval"])
     parser.add_argument("--max-seq-len", type=int, default=4096)
     parser.add_argument("--num-requests", type=int, default=1000)
-    parser.add_argument("--tokenizer",
-                        type=str,
-                        default="Qwen/Qwen2.5-0.5B")
+    parser.add_argument("--tokenizer", type=str, default="Qwen/Qwen2.5-0.5B")
     parser.add_argument("--num-samples", type=int, default=1)
     parser.add_argument("--rate", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--disable-ignore-eos", action="store_true")
     parser.add_argument("--print-output-text", action="store_true")
+    parser.add_argument("--num-padding-requests", type=int, default=32)
     args = parser.parse_args()
 
     np.random.seed(args.seed)

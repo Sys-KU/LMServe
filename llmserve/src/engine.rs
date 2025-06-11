@@ -182,7 +182,7 @@ impl LLMEngine {
             seq.cached = cached;
         }
 
-        let infer_task = InferTask::new(session_id.clone(), seqs, utils::time::now());
+        let infer_task = InferTask::new(session_id.clone(), seqs, utils::time::now_ns());
 
         {
             self.scheduler.lock().await.add(infer_task);
@@ -315,6 +315,39 @@ impl LLMEngine {
 pub struct LLMEngineOutput {
     pub session_id: String,
     pub output_ids: Vec<u32>,
+    /// Token latencies in seconds.
+    pub token_latencies: Vec<f32>,
+}
+
+impl LLMEngineOutput {
+    pub fn from_task(task: &InferTask) -> Self {
+        let seqs = task.get_seqs(SeqStatus::FINISHED);
+        let selected_seq = seqs
+            .iter()
+            .max_by(|a, b| {
+                norm_log_probs(a.get_token_probs().as_ref())
+                    .partial_cmp(&norm_log_probs(b.get_token_probs().as_ref()))
+                    .unwrap()
+            })
+            .expect("Failed to select sequence: max_by() returned None.");
+
+        let output_ids = selected_seq.get_output_ids();
+
+        let mut token_times = Vec::with_capacity(selected_seq.append_token_times.len() + 1);
+        token_times.push(task.get_arrival_time());
+        token_times.extend_from_slice(&selected_seq.append_token_times);
+
+        let token_latencies: Vec<f32> = token_times
+            .windows(2)
+            .map(|pair| pair[1].saturating_sub(pair[0]) as f32 / 1e9)
+            .collect();
+
+        Self {
+            session_id: task.get_session_id(),
+            output_ids: output_ids.to_vec(),
+            token_latencies,
+        }
+    }
 }
 
 pub struct LLMEngineWrapper {
@@ -384,29 +417,16 @@ impl LLMEngineWrapper {
 
         notify.notified().await;
 
-        let request_output = {
+        let request_output: InferTask = {
             self.request_outputs
                 .lock()
                 .await
                 .remove(&session_id)
                 .unwrap()
         };
-        let seqs = request_output.get_seqs(SeqStatus::FINISHED);
-        let selected_seq = seqs
-            .iter()
-            .max_by(|a, b| {
-                norm_log_probs(a.get_token_probs().as_ref())
-                    .partial_cmp(&norm_log_probs(b.get_token_probs().as_ref()))
-                    .unwrap()
-            })
-            .expect("Failed to select sequence: max_by() returned None.");
 
-        let output_ids = selected_seq.get_output_ids();
-
-        Ok(LLMEngineOutput {
-            session_id: session_id.clone(),
-            output_ids: output_ids.to_vec(),
-        })
+        let engine_output = LLMEngineOutput::from_task(&request_output);
+        Ok(engine_output)
     }
 
     pub async fn get_descriptors(&self, session_id: String) -> Result<(Vec<Bytes>, usize)> {

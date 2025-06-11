@@ -13,6 +13,7 @@ pub struct GenerateOutput {
     pub token_ids: Vec<u32>,
     pub output_text: String,
     pub output_len: usize,
+    pub token_latencies: Vec<f32>,
 }
 
 #[derive(Deserialize)]
@@ -49,7 +50,7 @@ impl APIServer {
         let response = self
             .router
             .generate(GenerateRequest {
-                session_id: session_id,
+                session_id,
                 input_ids: input_ids.clone(),
                 num_samples: params.num_samples as u32,
                 max_output_len: params.max_output_len,
@@ -68,6 +69,7 @@ impl APIServer {
             token_ids: [input_ids, output_ids].concat(),
             output_text,
             output_len,
+            token_latencies: response.token_latencies,
         })
     }
 }
