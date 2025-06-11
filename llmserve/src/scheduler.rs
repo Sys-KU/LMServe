@@ -8,6 +8,11 @@ use crate::infer_task::{InferInput, InferOutput, InferTask};
 use crate::pb::worker::BlockMapping;
 use crate::sequence::{SeqStatus, Sequence};
 
+struct BatchEntry {
+    pub input_len: usize,
+    pub chunked: bool,
+}
+
 pub struct Scheduler {
     pub max_batch_size: usize,
     pub max_seq_len: usize,
@@ -16,6 +21,8 @@ pub struct Scheduler {
     watermark_blocks: f32,
     waiting: VecDeque<InferTask>,
     allocated: VecDeque<InferTask>,
+
+    running_batch: HashMap<u64, BatchEntry>,
 
     last_log_time: u64,
 }
@@ -36,6 +43,7 @@ impl Scheduler {
             watermark_blocks: 0.97,
             waiting: VecDeque::new(),
             allocated: VecDeque::new(),
+            running_batch: HashMap::new(),
             last_log_time: 0,
         }
     }
@@ -101,7 +109,15 @@ impl Scheduler {
         }
     }
 
-    fn generate_infer_inputs(&self) -> (Vec<InferInput>, Vec<BlockMapping>, Vec<BlockMapping>) {
+    fn dispatch(
+        &mut self,
+    ) -> (
+        HashMap<u64, BatchEntry>,
+        Vec<InferInput>,
+        Vec<BlockMapping>,
+        Vec<BlockMapping>,
+    ) {
+        let mut running_batch: HashMap<u64, BatchEntry> = HashMap::new();
         let mut infer_inputs: Vec<InferInput> = Vec::new();
         let mut fetch_block_mappings: Vec<BlockMapping> = Vec::new();
         let mut write_back_block_mappings: Vec<BlockMapping> = Vec::new();
@@ -115,14 +131,27 @@ impl Scheduler {
                 }
 
                 let filled = match seq.cached {
-                    true => seq.token_ids.len() - 1,
+                    true => {
+                        let cached_len = seq.token_ids.len() - 1;
+                        self.block_manager.update_filled_len(seq.seq_id, cached_len);
+                        cached_len
+                    }
                     false => self.block_manager.get_filled_token_len(seq.seq_id),
                 };
                 let total = seq.token_ids.len();
                 let input_len = min(total - filled, token_budget);
                 if input_len > 0 {
                     let input_ids = seq.token_ids[filled..filled + input_len].to_vec();
-                    let block_ids = self.block_manager.get_block_ids(seq);
+                    let (_, block_ids) =
+                        self.block_manager
+                            .get_block_ids_range(seq.seq_id, 0, filled + input_len);
+
+                    let chunked = total > (filled + input_len);
+
+                    let entry = BatchEntry {
+                        input_len: input_ids.len(),
+                        chunked,
+                    };
 
                     infer_inputs.push(InferInput::new(
                         seq.seq_id,
@@ -133,7 +162,7 @@ impl Scheduler {
 
                     let block_mapping = BlockMapping {
                         seq_id: seq.seq_id,
-                        block_ids: block_ids,
+                        block_ids,
                     };
 
                     if seq.cached {
@@ -143,11 +172,14 @@ impl Scheduler {
 
                     num_seqs += 1;
                     token_budget -= input_len;
+
+                    running_batch.insert(seq.seq_id, entry);
                 }
             }
         }
 
         (
+            running_batch,
             infer_inputs,
             fetch_block_mappings,
             write_back_block_mappings,
@@ -184,8 +216,11 @@ impl Scheduler {
         }
 
         self.allocated = allocated;
-        let (infer_inputs, fetch_block_mappings, write_back_block_mappings) =
-            self.generate_infer_inputs();
+
+        let (running_batch, infer_inputs, fetch_block_mappings, write_back_block_mappings) =
+            self.dispatch();
+
+        self.running_batch = running_batch;
 
         {
             // Logging
@@ -214,14 +249,23 @@ impl Scheduler {
         let now = utils::time::now_ns();
 
         for mut task in self.allocated.drain(..) {
-            for seq in task.get_active_seqs_mut() {
-                let Some(output) = infer_outputs.get(&seq.seq_id) else {
-                    continue;
+            for seq in task.get_seqs_mut(SeqStatus::ALLOCATED) {
+                let (output, entry) = match (
+                    infer_outputs.get(&seq.seq_id),
+                    self.running_batch.get(&seq.seq_id),
+                ) {
+                    (Some(output), Some(entry)) => (output, entry),
+                    _ => continue,
                 };
 
-                self.block_manager.update_filled_tokens(seq);
-                seq.cached = false;
+                self.block_manager
+                    .update_filled_len(seq.seq_id, entry.input_len as usize);
 
+                if entry.chunked {
+                    continue;
+                }
+
+                seq.cached = false;
                 seq.append_output_id(
                     output.output_id,
                     output.prob,
@@ -229,12 +273,11 @@ impl Scheduler {
                     now,
                 );
 
-                if !seq.ignore_eos && output.is_eos {
-                    seq.status = SeqStatus::FINISHED;
-                } else if seq
+                let reached_max_len = seq
                     .max_output_len
-                    .map_or(false, |max_output_len| seq.output_len >= max_output_len)
-                {
+                    .map_or(false, |max| seq.output_len >= max);
+
+                if (!seq.ignore_eos && output.is_eos) || reached_max_len {
                     seq.status = SeqStatus::FINISHED;
                 }
             }
@@ -251,6 +294,7 @@ impl Scheduler {
         }
 
         self.allocated = still_allocated_tasks;
+        self.running_batch.clear();
 
         finished_tasks
     }

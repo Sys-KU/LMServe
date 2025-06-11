@@ -44,6 +44,13 @@ impl InferTask {
             .collect()
     }
 
+    pub fn get_seqs_mut(&mut self, status: SeqStatus) -> Vec<&mut Sequence> {
+        self.seqs
+            .iter_mut()
+            .filter(|seq| seq.status == status)
+            .collect()
+    }
+
     pub fn get_status(&self) -> InferTaskStatus {
         self.status
     }
