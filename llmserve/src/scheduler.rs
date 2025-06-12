@@ -130,7 +130,8 @@ impl Scheduler {
                     break 'outer;
                 }
 
-                let filled = match seq.cached {
+                let total = seq.token_ids.len();
+                let mut filled = match seq.cached {
                     true => {
                         let cached_len = seq.token_ids.len() - 1;
                         self.block_manager.update_filled_len(seq.seq_id, cached_len);
@@ -138,8 +139,10 @@ impl Scheduler {
                     }
                     false => self.block_manager.get_filled_token_len(seq.seq_id),
                 };
-                let total = seq.token_ids.len();
+                // Although all tokens are filled, we use last token to generate an output token.
+                filled = min(filled, total - 1);
                 let input_len = min(total - filled, token_budget);
+
                 if input_len > 0 {
                     let input_ids = seq.token_ids[filled..filled + input_len].to_vec();
                     let (_, block_ids) =
