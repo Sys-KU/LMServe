@@ -95,7 +95,7 @@ struct BlockAllocator {
 
 // Make BlockAllocator methods return `Option<T>` instead of panicking.
 impl BlockAllocator {
-    pub fn new(block_size: usize, num_blocks: usize) -> Self {
+    fn new(block_size: usize, num_blocks: usize) -> Self {
         let block_pool: Vec<Block> = (0..num_blocks as u32)
             .map(|id| Block::new(id, block_size))
             .collect();
@@ -214,16 +214,15 @@ impl BlockMap {
         self.num_allocated_slots += num_allocated_slots;
     }
 }
-
-pub struct BlockManager {
-    pub block_size: usize,
+struct BlockManagerImpl {
+    block_size: usize,
     seq_block_mapping_table: HashMap<u64, BlockMap>,
     hash_block_table: HashMap<u64, u32>, // HashMap<hash value, block id>
     block_allocator: BlockAllocator,
 }
 
-impl BlockManager {
-    pub fn new(block_size: usize, num_blocks: usize) -> Self {
+impl BlockManagerImpl {
+    fn new(block_size: usize, num_blocks: usize) -> Self {
         let block_allocator = BlockAllocator::new(block_size, num_blocks);
 
         Self {
@@ -234,13 +233,13 @@ impl BlockManager {
         }
     }
 
-    pub fn get_block_ids(&self, seq: &Sequence) -> Vec<u32> {
+    fn get_block_ids(&self, seq_id: u64) -> Vec<u32> {
         self.seq_block_mapping_table
-            .get(&seq.seq_id)
+            .get(&seq_id)
             .map_or(Vec::new(), |block_map| block_map.block_ids.clone())
     }
 
-    pub fn get_block_ids_range(&self, seq_id: u64, start: usize, end: usize) -> (usize, Vec<u32>) {
+    fn get_block_ids_range(&self, seq_id: u64, start: usize, end: usize) -> (usize, Vec<u32>) {
         let block_offset = start / self.block_size;
         let mut block_end = end / self.block_size + 1;
 
@@ -258,13 +257,13 @@ impl BlockManager {
         }
     }
 
-    pub fn get_filled_token_len(&self, seq_id: u64) -> usize {
+    fn get_filled_token_len(&self, seq_id: u64) -> usize {
         self.seq_block_mapping_table
             .get(&seq_id)
             .map_or(0, |block_map| block_map.filled_token_len)
     }
 
-    pub fn get_num_required_blocks(&self, seq: &Sequence) -> usize {
+    fn get_num_required_blocks(&self, seq: &Sequence) -> usize {
         let filled_token_len = self.get_filled_token_len(seq.seq_id);
         let total_token_len = seq.token_ids.len();
         let num_required_slots = total_token_len.saturating_sub(filled_token_len);
@@ -283,7 +282,7 @@ impl BlockManager {
             .map_or(0, |block_map| block_map.num_allocated_slots)
     }
 
-    pub fn can_alloc_blocks(&self, num_blocks: usize, watermark: f32) -> bool {
+    fn can_alloc_blocks(&self, num_blocks: usize, watermark: f32) -> bool {
         self.block_allocator.can_alloc_blocks(num_blocks, watermark)
     }
 
@@ -407,59 +406,11 @@ impl BlockManager {
         num_alloc_tokens
     }
 
-    fn copy_block(&mut self, src_block_id: u32) -> &mut Block {
-        let token_ids = {
-            let src_block = self.block_allocator.get_block(src_block_id);
-            src_block.token_ids.clone()
-        };
-        let new_block = self.block_allocator.alloc_block();
-
-        self.hash_block_table.remove(&new_block.get_hash());
-
-        new_block.token_ids = token_ids.clone();
-        new_block
-    }
-
-    pub fn reserve_blocks(&mut self, seq: &Sequence) -> usize {
+    fn reserve_blocks(&mut self, seq: &Sequence) -> usize {
         self.alloc_blocks(seq)
     }
 
-    pub fn extend_blocks(
-        &mut self,
-        seq: &Sequence,
-        blocks_to_copy: &mut HashMap<u32, Vec<u32>>,
-    ) -> usize {
-        // TODO(jinu): Remove copy blocks.
-        let copy_block_id = self
-            .get_last_block_id(seq.seq_id)
-            .filter(|block_id| {
-                let block = self.block_allocator.get_block(*block_id);
-                block.ref_cnt > 1 && block.get_num_empty_slots() > 0
-            })
-            .map(|block_id| block_id);
-
-        if let Some(copy_block_id) = copy_block_id {
-            let new_block_id = self.copy_block(copy_block_id).id;
-            self.block_allocator.free_block(copy_block_id);
-
-            self.seq_block_mapping_table
-                .entry(seq.seq_id)
-                .and_modify(|block_map| {
-                    if let Some(last_block_id) = block_map.block_ids.last_mut() {
-                        *last_block_id = new_block_id;
-                    }
-                });
-
-            blocks_to_copy
-                .entry(copy_block_id)
-                .and_modify(|block_ids| block_ids.push(new_block_id))
-                .or_insert(vec![new_block_id]);
-        }
-
-        self.alloc_blocks(seq)
-    }
-
-    pub fn share_blocks(
+    fn share_blocks(
         &mut self,
         src_seq: &Sequence,
         dst_seq: &Sequence,
@@ -511,7 +462,7 @@ impl BlockManager {
         Ok(dst_token_ids[0..shared_token_len].to_vec())
     }
 
-    pub fn update_filled_len(&mut self, seq_id: u64, new_filled_token_len: usize) {
+    fn update_filled_len(&mut self, seq_id: u64, new_filled_token_len: usize) {
         self.seq_block_mapping_table
             .entry(seq_id)
             .and_modify(|block_map| {
@@ -522,7 +473,7 @@ impl BlockManager {
             });
     }
 
-    pub fn free(&mut self, seq: &Sequence) -> Result<(), BlockAllocError> {
+    fn free(&mut self, seq: &Sequence) -> Result<(), BlockAllocError> {
         let block_map = self
             .seq_block_mapping_table
             .remove(&seq.seq_id)
@@ -535,7 +486,66 @@ impl BlockManager {
         Ok(())
     }
 
-    pub fn get_block_usage(&self) -> f32 {
+    fn get_block_usage(&self) -> f32 {
         self.block_allocator.get_block_usage()
+    }
+}
+
+pub struct BlockManager {
+    gpu_block_manager: BlockManagerImpl,
+}
+
+impl BlockManager {
+    pub fn new(block_size: usize, num_blocks: usize) -> Self {
+        Self {
+            gpu_block_manager: BlockManagerImpl::new(block_size, num_blocks),
+        }
+    }
+
+    pub fn get_block_ids(&self, seq_id: u64) -> Vec<u32> {
+        self.gpu_block_manager.get_block_ids(seq_id)
+    }
+
+    pub fn get_block_ids_range(&self, seq_id: u64, start: usize, end: usize) -> (usize, Vec<u32>) {
+        self.gpu_block_manager
+            .get_block_ids_range(seq_id, start, end)
+    }
+
+    pub fn get_filled_token_len(&self, seq_id: u64) -> usize {
+        self.gpu_block_manager.get_filled_token_len(seq_id)
+    }
+
+    pub fn get_num_required_blocks(&self, seq: &Sequence) -> usize {
+        self.gpu_block_manager.get_num_required_blocks(seq)
+    }
+
+    pub fn can_alloc_blocks(&self, num_blocks: usize, watermark: f32) -> bool {
+        self.gpu_block_manager
+            .can_alloc_blocks(num_blocks, watermark)
+    }
+
+    pub fn reserve_blocks(&mut self, seq: &Sequence) -> usize {
+        self.gpu_block_manager.reserve_blocks(seq)
+    }
+
+    pub fn share_blocks(
+        &mut self,
+        src_seq: &Sequence,
+        dst_seq: &Sequence,
+    ) -> Result<Vec<u32>, BlockAllocError> {
+        self.gpu_block_manager.share_blocks(src_seq, dst_seq)
+    }
+
+    pub fn update_filled_len(&mut self, seq_id: u64, new_filled_token_len: usize) {
+        self.gpu_block_manager
+            .update_filled_len(seq_id, new_filled_token_len)
+    }
+
+    pub fn free(&mut self, seq: &Sequence) -> Result<(), BlockAllocError> {
+        self.gpu_block_manager.free(seq)
+    }
+
+    pub fn get_block_usage(&self) -> f32 {
+        self.gpu_block_manager.get_block_usage()
     }
 }
