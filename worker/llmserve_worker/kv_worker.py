@@ -3,6 +3,8 @@ import pycuda.driver as cuda
 import numpy as np
 import torch.multiprocessing as mp
 import enum
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -233,6 +235,7 @@ class KVWorker:
         name: str,
         params: KVWorkerParams,
         host_cache_size: int,
+        thread_pool_size: int = 4,
     ):
         storage = torch.UntypedStorage._new_shared_cuda(
             *params.kv_cache_metadata)
@@ -282,8 +285,58 @@ class KVWorker:
         self.reg_desc = reg_desc
         self.kv_agent_metadata = kv_agent.get_agent_metadata()
         self.kv_agent = kv_agent
+        self.thread_pool = ThreadPoolExecutor(max_workers=thread_pool_size)
 
-    def transfer(
+    async def write_back_kv_inner(
+        self,
+        write_back_block_mappings,
+        dtoh_stream=None,
+    ):
+        loop = asyncio.get_event_loop()
+        ctx = cuda.Context.attach()
+        if dtoh_stream is None:
+            dtoh_stream = cuda.Stream()
+        for layer_idx in range(self.num_layers):
+            if len(write_back_block_mappings) > 0:
+                await loop.run_in_executor(
+                    self.thread_pool, self.kv_worker_handle.kv_queue.get
+                )
+                dtoh_stream.wait_for_event(self.kv_worker_handle.post_events[layer_idx])
+                for block_mapping in write_back_block_mappings:
+                    self.kv_store.write_back(
+                        block_mapping.seq_id,
+                        layer_idx,
+                        block_mapping.block_ids,
+                        dtoh_stream,
+                    )
+
+        for block_mapping in write_back_block_mappings:
+            self.kv_store.commit_write_back(block_mapping.seq_id)
+
+    async def fetch_kv_inner(
+        self,
+        fetch_block_mappings,
+        htod_stream=None,
+    ) -> None:
+        loop = asyncio.get_event_loop()
+        ctx = cuda.Context.attach()
+        if htod_stream is None:
+            htod_stream = cuda.Stream()
+        for layer_idx in range(self.num_layers):
+            if len(fetch_block_mappings) > 0:
+                for block_mapping in fetch_block_mappings:
+                    self.kv_store.fetch(
+                        block_mapping.seq_id,
+                        layer_idx,
+                        block_mapping.block_ids,
+                        htod_stream,
+                    )
+                self.kv_worker_handle.pre_events[layer_idx].record()
+                await loop.run_in_executor(
+                    self.thread_pool, self.kv_worker_handle.model_queue.put, b""
+                )
+
+    async def transfer(
         self,
         fetch_block_mappings: List[BlockMapping],
         write_back_block_mappings: List[BlockMapping],
@@ -294,33 +347,11 @@ class KVWorker:
                 block_ids=block_mapping.block_ids,
             )
 
-        for layer_idx in range(self.num_layers):
-            if len(fetch_block_mappings) > 0:
-                for block_mapping in fetch_block_mappings:
-                    self.kv_store.fetch(
-                        block_mapping.seq_id,
-                        layer_idx,
-                        block_mapping.block_ids,
-                        self.htod_stream,
-                    )
-                self.kv_worker_handle.pre_events[layer_idx].record()
-                self.kv_worker_handle.model_queue.put(b'')
-
-            if len(write_back_block_mappings) > 0:
-                self.kv_worker_handle.kv_queue.get()
-                self.dtoh_stream.wait_for_event(
-                    self.kv_worker_handle.post_events[layer_idx])
-                for block_mapping in write_back_block_mappings:
-                    self.kv_store.write_back(
-                        block_mapping.seq_id,
-                        layer_idx,
-                        block_mapping.block_ids,
-                        self.dtoh_stream,
-                    )
-
-        for block_mapping in write_back_block_mappings:
-            self.kv_store.commit_write_back(block_mapping.seq_id)
-
+        kv_transfer_tasks = [
+            self.fetch_kv_inner(fetch_block_mappings, self.htod_stream),
+            self.write_back_kv_inner(write_back_block_mappings, self.dtoh_stream),
+        ]
+        await asyncio.gather(*kv_transfer_tasks)
         self.htod_stream.synchronize()
         self.dtoh_stream.synchronize()
 

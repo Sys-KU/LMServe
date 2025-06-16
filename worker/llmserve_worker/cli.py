@@ -120,7 +120,7 @@ class KVWorkerService(worker_pb2_grpc.KVWorkerServicer):
         fetch_block_mappings = request.fetch_block_mappings
         write_back_block_mappings = request.write_back_block_mappings
 
-        self.worker.transfer(fetch_block_mappings, write_back_block_mappings)
+        await self.worker.transfer(fetch_block_mappings, write_back_block_mappings)
 
         return KVTransferResponse(success=True)
 
