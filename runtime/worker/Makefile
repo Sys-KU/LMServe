@@ -8,6 +8,7 @@ PB_FILES         := $(addprefix $(PY_PROTO_OUT_DIR)/, $(PROTOS:.proto=_pb2.py))
 PB_GRPC_FILES    := $(addprefix $(PY_PROTO_OUT_DIR)/, $(PROTOS:.proto=_pb2_grpc.py))
 
 UV 				 := $(shell command -v uv 2>/dev/null)
+PYTHON           := python3
 
 ifeq ($(UV),)
     $(info 'uv' not found - falling back to pip.)
@@ -16,6 +17,7 @@ ifeq ($(UV),)
 else
     $(info Found 'uv' at $(UV); using it for installs.)
     PIP_CMD := $(UV) pip
+    PYTHON  := $(UV) run python
 endif
 
 .PHONY: install build-dev compile-pb clean check-grpc-tools
@@ -33,14 +35,14 @@ compile-pb: check-grpc-tools $(PB_FILES) $(PB_GRPC_FILES)
 
 $(PY_PROTO_OUT_DIR)/%_pb2.py: $(PROTO_DIR)/%.proto
 	@mkdir -p $(PY_PROTO_OUT_DIR)
-	python -m grpc_tools.protoc \
+	$(PYTHON) -m grpc_tools.protoc \
 		--proto_path=$(PROTO_DIR) \
 		--python_out=$(PY_PROTO_OUT_DIR) \
 		$<
 
 $(PY_PROTO_OUT_DIR)/%_pb2_grpc.py: $(PROTO_DIR)/%.proto
 	@mkdir -p $(PY_PROTO_OUT_DIR)
-	python -m grpc_tools.protoc \
+	$(PYTHON) -m grpc_tools.protoc \
 		--proto_path=$(PROTO_DIR) \
 		--grpc_python_out=$(PY_PROTO_OUT_DIR) \
 		$<
